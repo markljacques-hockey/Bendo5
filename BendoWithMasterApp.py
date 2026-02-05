@@ -239,8 +239,7 @@ if uploaded_file is not None:
     pool_d = available[available['1st Choice'] == 'D'].copy()
     pool_f = available[available['1st Choice'] == 'F'].copy()
 
-    # --- RESTORED BALANCER LOGIC (Surplus Checks & Named Alerts) ---
-    
+    # --- BALANCER LOGIC (Surplus Checks & Named Alerts) ---
     # 1. Critical D Shortage (Must have at least 6 D)
     if len(pool_d) < MIN_D_CRITICAL:
         needed = MIN_D_CRITICAL - len(pool_d)
@@ -347,14 +346,25 @@ if uploaded_file is not None:
         st.divider()
         for r in rival_logs: st.success(f"⚖️ {r}")
 
+    # --- SCORE CALCULATIONS ---
+    common_count = min(len(ta), len(tb))
+    total_a = ta['Score'].sum()
+    total_b = tb['Score'].sum()
+    fair_a = get_top_n_score(ta, common_count)
+    fair_b = get_top_n_score(tb, common_count)
+
     c1, c2 = st.columns(2)
     with c1:
         st.header("🔴 Red Team")
-        st.write(f"Score: {ta['Score'].sum():.1f} | Players: {len(ta)}")
+        st.write(f"**Total Score:** {total_a:.1f}")
+        if len(ta) != len(tb): st.write(f"**Top {common_count} Score:** {fair_a:.1f}")
+        st.write(f"Players: {len(ta)} ({len(ta[ta['Position']=='D'])} D / {len(ta[ta['Position']=='F'])} F)")
         st.dataframe(ta[['Full Name', 'Position']], hide_index=True)
     with c2:
         st.header("⚪ White Team")
-        st.write(f"Score: {tb['Score'].sum():.1f} | Players: {len(tb)}")
+        st.write(f"**Total Score:** {total_b:.1f}")
+        if len(ta) != len(tb): st.write(f"**Top {common_count} Score:** {fair_b:.1f}")
+        st.write(f"Players: {len(tb)} ({len(tb[tb['Position']=='D'])} D / {len(tb[tb['Position']=='F'])} F)")
         st.dataframe(tb[['Full Name', 'Position']], hide_index=True)
 
     if not cuts_d.empty or not cuts_f.empty:
