@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Hockey Team Balancer")
 
-# --- 2. CACHED DATA LOADER (DEBUG VERSION) ---
+# --- 2. CACHED DATA LOADER ---
 @st.cache_data
 def load_excel_data(uploaded_file):
     try:
@@ -58,16 +58,26 @@ def find_col_case_insensitive(df, target_names):
     return None
 
 def get_birthday_message(players_df, bday_col):
+    """
+    Checks for birthdays in the current calendar week (Mon-Sun).
+    Includes SUNDAY LOOKAHEAD logic.
+    """
     if not bday_col or bday_col not in players_df.columns: return "", []
+    
     today = datetime.now()
-    if today.weekday() == 6: start_of_week = today + timedelta(days=1)
-    else: start_of_week = today - timedelta(days=today.weekday())
+    
+    # SUNDAY LOOKAHEAD: If today is Sunday (6), look at NEXT week.
+    if today.weekday() == 6:
+        start_of_week = today + timedelta(days=1)
+    else:
+        start_of_week = today - timedelta(days=today.weekday())
+        
     start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_week = start_of_week + timedelta(days=6)
     end_of_week = end_of_week.replace(hour=23, minute=59, second=59, microsecond=999999)
     celebrants = []
     
-    # Work on a copy to avoid SettingWithCopyWarning
+    # Work on a copy
     work_df = players_df.copy()
     work_df[bday_col] = pd.to_datetime(work_df[bday_col], errors='coerce')
 
@@ -82,7 +92,11 @@ def get_birthday_message(players_df, bday_col):
                 except ValueError: candidates.append(bday.replace(year=y, month=3, day=1))
             
             if any(start_of_week <= c <= end_of_week for c in candidates):
-                name = row.get('Full Name', row.get('Name', 'Unknown'))
+                # Try to get a valid name
+                if 'Full Name' in row: name = row['Full Name']
+                elif 'Name' in row: name = row['Name']
+                else: name = "Unknown Player"
+                
                 if name not in celebrants: celebrants.append(name)
         except: continue
             
@@ -104,12 +118,14 @@ if uploaded_file is not None:
     
     if error_msg:
         st.error(f"❌ Error reading file: {error_msg}")
-        st.warning("Troubleshooting:\n1. Ensure file is not open in Excel.\n2. Ensure file is not password protected.\n3. Try saving as a standard .xlsx file.")
+        st.warning("Troubleshooting:\n1. Ensure file is not open in Excel.\n2. Ensure file is not password protected.")
         st.stop()
         
     all_sheet_names = list(all_sheets.keys())
     master_sheet_name = next((s for s in all_sheet_names if "master" in s.lower()), None)
-    block_list = ["master", "instructions", "instruction", "reference"]
+    
+    # FILTER: Strictly remove Master/Instructions/Reference
+    block_list = ["master", "instructions", "instruction", "reference", "setup"]
     valid_sheets = [s for s in all_sheet_names if not any(b in s.lower() for b in block_list)]
     
     if not valid_sheets:
@@ -119,7 +135,7 @@ if uploaded_file is not None:
     selected_sheet = st.selectbox("Select Roster:", valid_sheets)
     df = all_sheets[selected_sheet].copy()
 
-    # --- NORMALIZE ---
+    # --- NORMALIZE COLUMNS ---
     col_name = find_col_case_insensitive(df, ['name', 'full name', 'fullname'])
     col_first = find_col_case_insensitive(df, ['first_name', 'first name'])
     col_last = find_col_case_insensitive(df, ['last_name', 'last name'])
@@ -149,7 +165,7 @@ if uploaded_file is not None:
     df['Email'] = df[col_email].fillna('').astype(str).str.strip() if col_email else ''
     df['Reg/Spare'] = df[col_reg] if col_reg else 'R'
 
-    # --- MASTER LOOKUP ---
+    # --- MASTER LOOKUP (BIRTHDAYS) ---
     bday_col_name = 'B-day'
     birthday_source = df # Default to daily sheet
     mapped_count = 0
@@ -167,12 +183,14 @@ if uploaded_file is not None:
                 if m_name: df_master['Key'] = df_master[m_name].apply(clean_name_key)
                 else: df_master['Key'] = (df_master[m_first].astype(str) + df_master[m_last].astype(str)).apply(clean_name_key)
                 
-                # Construct clean Full Name for Greeting
+                # Construct Full Name for Greeting
                 if m_name: df_master['Full Name'] = df_master[m_name]
                 else: df_master['Full Name'] = df_master[m_first].astype(str) + ' ' + df_master[m_last].astype(str)
 
                 df_master[bday_col_name] = pd.to_datetime(df_master[m_bday], errors='coerce')
-                birthday_source = df_master # USE MASTER FOR GREETING SOURCE
+                
+                # USE MASTER FOR GREETING SOURCE
+                birthday_source = df_master 
                 
                 # Map to Daily for Debugging/Reference
                 bday_map = df_master.set_index('Key')[bday_col_name].to_dict()
@@ -208,7 +226,7 @@ if uploaded_file is not None:
     
     st.info(f"**Strategy ({selected_sheet}):** {total} players -> {target_f} F / {target_d} D")
     
-    # --- BIRTHDAY CHECK (Uses birthday_source, usually Master) ---
+    # --- BIRTHDAY CHECK (Uses birthday_source) ---
     bday_msg, bday_names = get_birthday_message(birthday_source, bday_col_name)
     with st.expander("🎂 Birthday Debugger", expanded=True):
         if bday_names: st.success(f"**Birthdays Found:** {', '.join(bday_names)}")
@@ -223,37 +241,51 @@ if uploaded_file is not None:
     pool_d = available[available['1st Choice'] == 'D'].copy()
     pool_f = available[available['1st Choice'] == 'F'].copy()
 
-    # Balancer
+    # --- BALANCER (Updated to show names) ---
+    # 1. Critical D Shortage
     if len(pool_d) < 6:
         needed = 6 - len(pool_d)
         conv = pool_f[pool_f['2nd Choice'] == 'D'].head(needed)
         if not conv.empty:
             pool_d = pd.concat([pool_d, conv]); pool_f = pool_f.drop(conv.index)
-            st.warning(f"⚠️ Low D: Moved {len(conv)} F->D")
+            # SHOW NAMES
+            moved_names = ", ".join(conv['Full Name'].tolist())
+            st.warning(f"⚠️ Critical D Shortage: Moved {len(conv)} F -> D: **{moved_names}**")
 
+    # 2. Forward Shortage
     if len(pool_f) < target_f:
         needed = target_f - len(pool_f)
         conv = pool_d[pool_d['2nd Choice'] == 'F'].head(needed)
         if not conv.empty:
             pool_f = pd.concat([pool_f, conv]); pool_d = pool_d.drop(conv.index)
-            st.info(f"Moved {len(conv)} D->F")
+            # SHOW NAMES
+            moved_names = ", ".join(conv['Full Name'].tolist())
+            st.info(f"Moved {len(conv)} D -> F: **{moved_names}**")
             
+    # 3. Defense Shortage
     if len(pool_d) < target_d:
         needed = target_d - len(pool_d)
         conv = pool_f[pool_f['2nd Choice'] == 'D'].head(needed)
         if not conv.empty:
             pool_d = pd.concat([pool_d, conv]); pool_f = pool_f.drop(conv.index)
-            st.info(f"Moved {len(conv)} F->D")
+            # SHOW NAMES
+            moved_names = ", ".join(conv['Full Name'].tolist())
+            st.info(f"Moved {len(conv)} F -> D: **{moved_names}**")
 
-    # Rivals
+    # --- RIVALS ---
     pre_a, pre_b, rival_logs = [], [], []
-    def extract(nm, pd, pf):
+    def extract(nm, pd_pool, pf_pool):
         key = clean_name_key(nm)
-        pd['K'], pf['K'] = pd['Full Name'].apply(clean_name_key), pf['Full Name'].apply(clean_name_key)
-        md, mf = pd[pd['K']==key], pf[pf['K']==key]
-        if not md.empty: return md.iloc[0].copy(), pd.drop(md.index), pf
-        if not mf.empty: return mf.iloc[0].copy(), pd, pf.drop(mf.index)
-        return None, pd, pf
+        pd_pool['K'] = pd_pool['Full Name'].apply(clean_name_key)
+        pf_pool['K'] = pf_pool['Full Name'].apply(clean_name_key)
+        
+        md, mf = pd_pool[pd_pool['K']==key], pf_pool[pf_pool['K']==key]
+        
+        if not md.empty: 
+            return md.iloc[0].copy(), pd_pool.drop(md.index), pf_pool
+        if not mf.empty: 
+            return mf.iloc[0].copy(), pd_pool, pf_pool.drop(mf.index)
+        return None, pd_pool, pf_pool
 
     rivals = [("Mike Tonietto", "Jamie Devin"), ("Mark Hicks", "Gary Fera")]
     pidx = 0
@@ -266,7 +298,7 @@ if uploaded_file is not None:
             else: pre_b.append(srt[0]); pre_a.append(srt[1])
             rival_logs.append(f"Separated {p1} & {p2}")
             pidx += 1
-        else: # Return if only 1 present
+        else:
             if o1 is not None: 
                 if o1['1st Choice']=='D': pool_d = pd.concat([pool_d, o1.to_frame().T])
                 else: pool_f = pd.concat([pool_f, o1.to_frame().T])
@@ -274,9 +306,10 @@ if uploaded_file is not None:
                 if o2['1st Choice']=='D': pool_d = pd.concat([pool_d, o2.to_frame().T])
                 else: pool_f = pd.concat([pool_f, o2.to_frame().T])
 
-    # Draft
-    for df_x in [pool_d, pool_f]: 
-        if 'K' in df_x.columns: del df_x['K']
+    # --- DRAFT ---
+    # Clean up temp keys
+    if 'K' in pool_d.columns: del pool_d['K']
+    if 'K' in pool_f.columns: del pool_f['K']
     
     pool_d = pool_d.sort_values(by=['Status_Rank', 'Score'], ascending=[True, False])
     pool_f = pool_f.sort_values(by=['Status_Rank', 'Score'], ascending=[True, False])
@@ -290,23 +323,22 @@ if uploaded_file is not None:
     cuts_f = pool_f.iloc[len(sel_f):].copy()
 
     sel_d['Position'] = 'D'; sel_f['Position'] = 'F'
-    for p in pre_a+pre_b: p['Position'] = p['1st Choice'] # Assign Pos to rivals
+    for p in pre_a+pre_b: p['Position'] = p['1st Choice']
 
     da, db = snake_draft(sel_d)
     fa, fb = snake_draft(sel_f)
 
-    # Combine
+    # --- COMBINE ---
     cols = ['Full Name', 'Position', 'Score', 'Email']
     def to_df(l): return pd.DataFrame(l) if l else pd.DataFrame(columns=cols)
     
     ta = pd.concat([to_df(pre_a), da, fa], ignore_index=True)
     tb = pd.concat([to_df(pre_b), db, fb], ignore_index=True)
     
-    # Sort
     ta = ta.sort_values(by=['Position', 'Full Name']).reset_index(drop=True)
     tb = tb.sort_values(by=['Position', 'Full Name']).reset_index(drop=True)
 
-    # UI
+    # --- UI DISPLAY ---
     if st.button("Shuffle"): st.rerun()
     if rival_logs: 
         st.divider()
@@ -330,7 +362,6 @@ if uploaded_file is not None:
     st.divider()
     all_p = pd.concat([ta, tb])
     if not all_p.empty:
-        # Email
         recipients = [e for e in all_p['Email'].unique() if pd.notna(e) and str(e).strip()]
         bcc = ",".join(recipients)
         body = f"""{bday_msg}Hello everyone,\n\nHere are the rosters for the upcoming game:\n\n{format_team_list(ta, "RED TEAM")}\n{format_team_list(tb, "WHITE TEAM")}\nKeep your sticks on the ice!"""
