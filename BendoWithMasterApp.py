@@ -68,8 +68,18 @@ def get_birthday_message(players_df, bday_col):
         return "", []
         
     today = datetime.now()
-    # Week Window: Monday 00:00 to Sunday 23:59
-    start_of_week = today - timedelta(days=today.weekday())
+    
+    # --- SUNDAY LOOKAHEAD LOGIC ---
+    # If today is Sunday (weekday 6), we assume the user is planning for 
+    # the UPCOMING week (starting tomorrow, Monday).
+    if today.weekday() == 6:
+        # Start window from Tomorrow (Monday)
+        start_of_week = today + timedelta(days=1)
+    else:
+        # Otherwise, start from this week's Monday
+        start_of_week = today - timedelta(days=today.weekday())
+        
+    # Normalize times
     start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_week = start_of_week + timedelta(days=6)
     end_of_week = end_of_week.replace(hour=23, minute=59, second=59, microsecond=999999)
@@ -245,9 +255,15 @@ if uploaded_file is not None:
         msg_check, bday_names = get_birthday_message(available, bday_col_name)
         with st.expander("🎂 Birthday Checker (Debug Info)", expanded=True):
             today = datetime.now()
-            s_week = today - timedelta(days=today.weekday())
+            # Calculate the window actually being used
+            if today.weekday() == 6: # Sunday Lookahead
+                s_week = today + timedelta(days=1)
+                st.write("📅 **Sunday detected:** Looking ahead to next week.")
+            else:
+                s_week = today - timedelta(days=today.weekday())
             e_week = s_week + timedelta(days=6)
-            st.write(f"**Week Window:** {s_week.strftime('%b %d')} — {e_week.strftime('%b %d')}")
+            
+            st.write(f"**Scanning Window:** {s_week.strftime('%b %d')} — {e_week.strftime('%b %d')}")
             st.write(f"**Master Lookup:** Matched birthdays for {mapped_count} players.")
             
             if bday_names:
@@ -303,7 +319,6 @@ if uploaded_file is not None:
     def extract_player(name, pd_pool, pf_pool):
         key = clean_name_key(name)
         # Check D
-        # Create temp key column for matching
         pd_pool['MatchKey'] = pd_pool['Full Name'].apply(clean_name_key)
         matches_d = pd_pool[pd_pool['MatchKey'] == key]
         if not matches_d.empty:
@@ -342,14 +357,12 @@ if uploaded_file is not None:
                 else: pool_f = pd.concat([pool_f, obj2.to_frame().T])
 
     # --- DRAFT ---
-    # Clean up temp cols
     if 'MatchKey' in pool_d.columns: del pool_d['MatchKey']
     if 'MatchKey' in pool_f.columns: del pool_f['MatchKey']
     
     pool_d = pool_d.sort_values(by=['Status_Rank', 'Score'], ascending=[True, False])
     pool_f = pool_f.sort_values(by=['Status_Rank', 'Score'], ascending=[True, False])
 
-    # Calculate remaining needs
     pre_d = len([p for p in pre_team_a + pre_team_b if p['Position'] == 'D'])
     pre_f = len([p for p in pre_team_a + pre_team_b if p['Position'] == 'F'])
     
