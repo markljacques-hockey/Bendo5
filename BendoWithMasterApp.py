@@ -58,15 +58,11 @@ def find_col_case_insensitive(df, target_names):
     return None
 
 def get_birthday_message(players_df, bday_col):
-    """
-    Checks for birthdays in the current calendar week (Mon-Sun).
-    Includes SUNDAY LOOKAHEAD logic.
-    """
     if not bday_col or bday_col not in players_df.columns: return "", []
     
     today = datetime.now()
     
-    # SUNDAY LOOKAHEAD: If today is Sunday (6), look at NEXT week.
+    # SUNDAY LOOKAHEAD LOGIC
     if today.weekday() == 6:
         start_of_week = today + timedelta(days=1)
     else:
@@ -75,6 +71,7 @@ def get_birthday_message(players_df, bday_col):
     start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_week = start_of_week + timedelta(days=6)
     end_of_week = end_of_week.replace(hour=23, minute=59, second=59, microsecond=999999)
+
     celebrants = []
     
     # Work on a copy
@@ -92,7 +89,6 @@ def get_birthday_message(players_df, bday_col):
                 except ValueError: candidates.append(bday.replace(year=y, month=3, day=1))
             
             if any(start_of_week <= c <= end_of_week for c in candidates):
-                # Try to get a valid name
                 if 'Full Name' in row: name = row['Full Name']
                 elif 'Name' in row: name = row['Name']
                 else: name = "Unknown Player"
@@ -217,12 +213,14 @@ if uploaded_file is not None:
     
     # --- TARGETS ---
     total = len(available)
-    BASE_F, BASE_D = 12, 8
+    BASE_F, BASE_D, MIN_D_CRITICAL = 12, 8, 6
+
     if total <= 20: target_f, target_d = BASE_F, BASE_D
     else:
         ex = total - 20
         add_f = min(ex, 6); ex -= add_f
-        target_f, target_d = BASE_F + add_f, BASE_D + min(ex, 4)
+        add_d = min(ex, 4)
+        target_f, target_d = BASE_F + add_f, BASE_D + add_d
     
     st.info(f"**Strategy ({selected_sheet}):** {total} players -> {target_f} F / {target_d} D")
     
@@ -241,36 +239,45 @@ if uploaded_file is not None:
     pool_d = available[available['1st Choice'] == 'D'].copy()
     pool_f = available[available['1st Choice'] == 'F'].copy()
 
-    # --- BALANCER (Updated to show names) ---
-    # 1. Critical D Shortage
-    if len(pool_d) < 6:
-        needed = 6 - len(pool_d)
-        conv = pool_f[pool_f['2nd Choice'] == 'D'].head(needed)
-        if not conv.empty:
-            pool_d = pd.concat([pool_d, conv]); pool_f = pool_f.drop(conv.index)
-            # SHOW NAMES
-            moved_names = ", ".join(conv['Full Name'].tolist())
-            st.warning(f"⚠️ Critical D Shortage: Moved {len(conv)} F -> D: **{moved_names}**")
+    # --- RESTORED BALANCER LOGIC (Surplus Checks & Named Alerts) ---
+    
+    # 1. Critical D Shortage (Must have at least 6 D)
+    if len(pool_d) < MIN_D_CRITICAL:
+        needed = MIN_D_CRITICAL - len(pool_d)
+        candidates = pool_f[pool_f['2nd Choice'] == 'D']
+        if not candidates.empty:
+            conv = candidates.head(needed)
+            pool_d = pd.concat([pool_d, conv])
+            pool_f = pool_f.drop(conv.index)
+            st.warning(f"⚠️ Critical D Shortage (<6): Moved {len(conv)} F -> D: **{', '.join(conv['Full Name'])}**")
 
-    # 2. Forward Shortage
+    # 2. Forward Shortage (Only take from D if D has surplus > 6)
     if len(pool_f) < target_f:
         needed = target_f - len(pool_f)
-        conv = pool_d[pool_d['2nd Choice'] == 'F'].head(needed)
-        if not conv.empty:
-            pool_f = pd.concat([pool_f, conv]); pool_d = pool_d.drop(conv.index)
-            # SHOW NAMES
-            moved_names = ", ".join(conv['Full Name'].tolist())
-            st.info(f"Moved {len(conv)} D -> F: **{moved_names}**")
-            
-    # 3. Defense Shortage
+        surplus_d = len(pool_d) - MIN_D_CRITICAL # Keep D above 6
+        
+        if surplus_d > 0:
+            can_take = min(needed, surplus_d)
+            candidates = pool_d[pool_d['2nd Choice'] == 'F']
+            if not candidates.empty:
+                conv = candidates.head(can_take)
+                pool_f = pd.concat([pool_f, conv])
+                pool_d = pool_d.drop(conv.index)
+                st.info(f"Balanced Forwards: Moved {len(conv)} D -> F: **{', '.join(conv['Full Name'])}**")
+
+    # 3. Defense Shortage (Only take from F if F has surplus > Target)
     if len(pool_d) < target_d:
-        needed = target_d - len(pool_d)
-        conv = pool_f[pool_f['2nd Choice'] == 'D'].head(needed)
-        if not conv.empty:
-            pool_d = pd.concat([pool_d, conv]); pool_f = pool_f.drop(conv.index)
-            # SHOW NAMES
-            moved_names = ", ".join(conv['Full Name'].tolist())
-            st.info(f"Moved {len(conv)} F -> D: **{moved_names}**")
+        d_shortage = target_d - len(pool_d)
+        surplus_f = len(pool_f) - target_f # Only take if F has more than they need
+        
+        if surplus_f > 0:
+            amount_to_move = min(d_shortage, surplus_f)
+            candidates = pool_f[pool_f['2nd Choice'] == 'D']
+            if not candidates.empty:
+                conv = candidates.head(amount_to_move)
+                pool_d = pd.concat([pool_d, conv])
+                pool_f = pool_f.drop(conv.index)
+                st.info(f"Balanced Defense: Moved {len(conv)} F -> D: **{', '.join(conv['Full Name'])}**")
 
     # --- RIVALS ---
     pre_a, pre_b, rival_logs = [], [], []
@@ -278,13 +285,9 @@ if uploaded_file is not None:
         key = clean_name_key(nm)
         pd_pool['K'] = pd_pool['Full Name'].apply(clean_name_key)
         pf_pool['K'] = pf_pool['Full Name'].apply(clean_name_key)
-        
         md, mf = pd_pool[pd_pool['K']==key], pf_pool[pf_pool['K']==key]
-        
-        if not md.empty: 
-            return md.iloc[0].copy(), pd_pool.drop(md.index), pf_pool
-        if not mf.empty: 
-            return mf.iloc[0].copy(), pd_pool, pf_pool.drop(mf.index)
+        if not md.empty: return md.iloc[0].copy(), pd_pool.drop(md.index), pf_pool
+        if not mf.empty: return mf.iloc[0].copy(), pd_pool, pf_pool.drop(mf.index)
         return None, pd_pool, pf_pool
 
     rivals = [("Mike Tonietto", "Jamie Devin"), ("Mark Hicks", "Gary Fera")]
@@ -298,7 +301,7 @@ if uploaded_file is not None:
             else: pre_b.append(srt[0]); pre_a.append(srt[1])
             rival_logs.append(f"Separated {p1} & {p2}")
             pidx += 1
-        else:
+        else: # Return if only 1 present
             if o1 is not None: 
                 if o1['1st Choice']=='D': pool_d = pd.concat([pool_d, o1.to_frame().T])
                 else: pool_f = pd.concat([pool_f, o1.to_frame().T])
@@ -306,8 +309,7 @@ if uploaded_file is not None:
                 if o2['1st Choice']=='D': pool_d = pd.concat([pool_d, o2.to_frame().T])
                 else: pool_f = pd.concat([pool_f, o2.to_frame().T])
 
-    # --- DRAFT ---
-    # Clean up temp keys
+    # Draft
     if 'K' in pool_d.columns: del pool_d['K']
     if 'K' in pool_f.columns: del pool_f['K']
     
@@ -328,17 +330,18 @@ if uploaded_file is not None:
     da, db = snake_draft(sel_d)
     fa, fb = snake_draft(sel_f)
 
-    # --- COMBINE ---
+    # Combine
     cols = ['Full Name', 'Position', 'Score', 'Email']
     def to_df(l): return pd.DataFrame(l) if l else pd.DataFrame(columns=cols)
     
     ta = pd.concat([to_df(pre_a), da, fa], ignore_index=True)
     tb = pd.concat([to_df(pre_b), db, fb], ignore_index=True)
     
+    # Sort
     ta = ta.sort_values(by=['Position', 'Full Name']).reset_index(drop=True)
     tb = tb.sort_values(by=['Position', 'Full Name']).reset_index(drop=True)
 
-    # --- UI DISPLAY ---
+    # UI
     if st.button("Shuffle"): st.rerun()
     if rival_logs: 
         st.divider()
@@ -362,6 +365,7 @@ if uploaded_file is not None:
     st.divider()
     all_p = pd.concat([ta, tb])
     if not all_p.empty:
+        # Email
         recipients = [e for e in all_p['Email'].unique() if pd.notna(e) and str(e).strip()]
         bcc = ",".join(recipients)
         body = f"""{bday_msg}Hello everyone,\n\nHere are the rosters for the upcoming game:\n\n{format_team_list(ta, "RED TEAM")}\n{format_team_list(tb, "WHITE TEAM")}\nKeep your sticks on the ice!"""
