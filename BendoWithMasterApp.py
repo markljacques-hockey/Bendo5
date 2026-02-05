@@ -51,7 +51,6 @@ def get_top_n_score(df, n):
     return df.sort_values(by='Score', ascending=False).head(n)['Score'].sum()
 
 def clean_name_key(name):
-    """Creates a simplified string for matching (lowercase, no spaces)."""
     if pd.isna(name): return ""
     return str(name).lower().replace(" ", "").strip()
 
@@ -69,17 +68,13 @@ def get_birthday_message(players_df, bday_col):
         
     today = datetime.now()
     
-    # --- SUNDAY LOOKAHEAD LOGIC ---
-    # If today is Sunday (weekday 6), we assume the user is planning for 
-    # the UPCOMING week (starting tomorrow, Monday).
+    # SUNDAY LOOKAHEAD LOGIC
+    # If today is Sunday (6), scan Next Week (Mon-Sun). Else scan Current Week (Mon-Sun).
     if today.weekday() == 6:
-        # Start window from Tomorrow (Monday)
         start_of_week = today + timedelta(days=1)
     else:
-        # Otherwise, start from this week's Monday
         start_of_week = today - timedelta(days=today.weekday())
         
-    # Normalize times
     start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_week = start_of_week + timedelta(days=6)
     end_of_week = end_of_week.replace(hour=23, minute=59, second=59, microsecond=999999)
@@ -92,24 +87,20 @@ def get_birthday_message(players_df, bday_col):
             
         try:
             if isinstance(bday, (pd.Timestamp, datetime)):
-                # Check Current, Prev, and Next year to handle year boundaries
                 candidates = []
                 years = [today.year, today.year - 1, today.year + 1]
                 for y in years:
                     try:
                         candidates.append(bday.replace(year=y))
                     except ValueError:
-                        # Handle leap years
                         candidates.append(bday.replace(year=y, month=3, day=1))
                 
-                # If ANY of the adjusted birthdays fall in this week window
                 if any(start_of_week <= c <= end_of_week for c in candidates):
                     celebrants.append(row['Full Name'])
         except Exception: continue
             
     if not celebrants: return "", []
 
-    # Grammar
     names_str = " and ".join([", ".join(celebrants[:-1]), celebrants[-1]] if len(celebrants) > 2 else celebrants)
     verb = "is" if len(celebrants) == 1 else "are"
     noun = "birthday" if len(celebrants) == 1 else "birthdays"
@@ -130,12 +121,22 @@ if uploaded_file is not None:
         st.stop()
         
     all_sheet_names = list(all_sheets.keys())
+    
+    # Identify Master Sheet (Used for lookups in background)
     master_sheet_name = next((s for s in all_sheet_names if "master" in s.lower()), None)
     
-    valid_sheets = [s for s in all_sheet_names if "master" not in s.lower() and "instructions" not in s.lower()]
+    # --- UPDATED FILTERING LOGIC ---
+    # Define words that, if found in a sheet name, will hide that sheet from the dropdown.
+    # Using 'instruction' (singular) covers 'instructions' (plural) too.
+    ignore_keywords = ['master', 'instruction', 'reference', 'setup', 'template']
+    
+    valid_sheets = [
+        s for s in all_sheet_names 
+        if not any(keyword in s.lower() for keyword in ignore_keywords)
+    ]
     
     if not valid_sheets:
-        st.error("No valid daily sheets found.")
+        st.error("No valid daily sheets found. Please ensure your game sheets don't have 'Master' or 'Instructions' in their names.")
         st.stop()
         
     selected_sheet = st.selectbox("Select the Sheet to use:", valid_sheets)
@@ -145,21 +146,23 @@ if uploaded_file is not None:
     except KeyError:
         st.stop()
 
-    # --- NORMALIZE DAILY SHEET ---
+    # --- NORMALIZE COLUMNS ---
     col_name = find_col_case_insensitive(df, ['name', 'full name', 'fullname'])
-    col_first = find_col_case_insensitive(df, ['first_name', 'first name', 'firstname'])
-    col_last = find_col_case_insensitive(df, ['last_name', 'last name', 'lastname'])
+    col_first = find_col_case_insensitive(df, ['first_name', 'first name'])
+    col_last = find_col_case_insensitive(df, ['last_name', 'last name'])
     col_avail = find_col_case_insensitive(df, ['availability', 'avail'])
     col_choice = find_col_case_insensitive(df, ['1st choice', '1stchoice', 'position', 'pos'])
     col_score = find_col_case_insensitive(df, ['score', 'rating', 'skill'])
     
+    # Validation
     if not (col_name or (col_first and col_last)):
-        st.error(f"Missing Name columns in '{selected_sheet}'.")
+        st.error(f"Missing Name columns in '{selected_sheet}'. Need 'Name' OR 'First_name'/'Last_name'.")
         st.stop()
     if not col_avail or not col_score or not col_choice:
         st.error(f"Missing one of: Availability, Score, 1st Choice in '{selected_sheet}'.")
         st.stop()
 
+    # Clean Data
     df['Availability'] = df[col_avail].astype(str).str.strip().str.upper()
     df['1st Choice'] = df[col_choice].astype(str).str.strip().str.upper()
     df['Score'] = df[col_score]
@@ -169,7 +172,6 @@ if uploaded_file is not None:
     else:
         df['Full Name'] = df[col_first].astype(str).str.strip() + ' ' + df[col_last].astype(str).str.strip()
     
-    # Optional Cols
     col_2nd = find_col_case_insensitive(df, ['2nd choice', '2ndchoice'])
     col_email = find_col_case_insensitive(df, ['email', 'e-mail'])
     col_reg = find_col_case_insensitive(df, ['reg/spare', 'status'])
@@ -178,59 +180,44 @@ if uploaded_file is not None:
     df['Email'] = df[col_email].fillna('').astype(str).str.strip() if col_email else ''
     df['Reg/Spare'] = df[col_reg] if col_reg else 'R'
 
-    # --- MASTER SHEET LOOKUP (ROBUST MATCHING) ---
+    # --- MASTER SHEET LOOKUP (BIRTHDAYS) ---
     bday_col_name = 'B-day' 
     mapped_count = 0
     
     if master_sheet_name:
         try:
             df_master = all_sheets[master_sheet_name].copy()
-            
-            # Identify Cols in Master
             m_col_name = find_col_case_insensitive(df_master, ['name', 'full name'])
             m_col_first = find_col_case_insensitive(df_master, ['first_name', 'first name'])
             m_col_last = find_col_case_insensitive(df_master, ['last_name', 'last name'])
-            m_col_bday = find_col_case_insensitive(df_master, ['b-day', 'bday', 'birthday', 'dob', 'date of birth'])
+            m_col_bday = find_col_case_insensitive(df_master, ['b-day', 'bday', 'birthday', 'dob'])
             
             if (m_col_name or (m_col_first and m_col_last)) and m_col_bday:
-                # Create Clean Match Key (lowercase, no spaces)
                 if m_col_name:
                     df_master['MatchKey'] = df_master[m_col_name].apply(clean_name_key)
                 else:
                     df_master['MatchKey'] = (df_master[m_col_first].astype(str) + df_master[m_col_last].astype(str)).apply(clean_name_key)
                 
-                # Ensure dates are dates
                 df_master[m_col_bday] = pd.to_datetime(df_master[m_col_bday], errors='coerce')
-                
-                # Remove duplicates (keep first found)
                 df_master = df_master.drop_duplicates(subset=['MatchKey'])
-                
-                # Create Dictionary: CleanKey -> Birthday
                 bday_map = df_master.set_index('MatchKey')[m_col_bday].to_dict()
                 
-                # Create Key in Daily Sheet to Match
                 df['MatchKey'] = df['Full Name'].apply(clean_name_key)
-                
-                # Perform Lookup
                 df[bday_col_name] = df['MatchKey'].map(bday_map)
-                
-                # Count matches for debugging
                 mapped_count = df[bday_col_name].notna().sum()
             else:
                 st.warning("Master sheet found but missing Name or B-day columns.")
         except Exception as e:
             st.warning(f"Error reading Master sheet: {e}")
     else:
-        # Fallback to daily sheet column if Master doesn't exist
         daily_bday = find_col_case_insensitive(df, ['b-day', 'bday', 'birthday'])
         if daily_bday: 
             bday_col_name = daily_bday
             df[bday_col_name] = pd.to_datetime(df[bday_col_name], errors='coerce')
             mapped_count = df[bday_col_name].notna().sum()
 
-    # --- FILTER PLAYERS ---
+    # --- FILTER ---
     available = df[df['Availability'].str.startswith('Y')].copy()
-    
     if available.empty:
         st.error(f"No players marked as 'Y' or 'Yes' in sheet '{selected_sheet}'.")
         st.stop()
@@ -238,13 +225,11 @@ if uploaded_file is not None:
     # --- TARGETS ---
     total_players = len(available)
     BASE_F, BASE_D, MIN_D_CRITICAL = 12, 8, 6
-
     if total_players <= 20:
         target_f, target_d = BASE_F, BASE_D
     else:
         extras = total_players - 20
-        add_to_f = min(extras, 6)
-        extras -= add_to_f
+        add_to_f = min(extras, 6); extras -= add_to_f
         add_to_d = min(extras, 4)
         target_f, target_d = BASE_F + add_to_f, BASE_D + add_to_d
     
@@ -255,10 +240,9 @@ if uploaded_file is not None:
         msg_check, bday_names = get_birthday_message(available, bday_col_name)
         with st.expander("🎂 Birthday Checker (Debug Info)", expanded=True):
             today = datetime.now()
-            # Calculate the window actually being used
-            if today.weekday() == 6: # Sunday Lookahead
+            if today.weekday() == 6: 
                 s_week = today + timedelta(days=1)
-                st.write("📅 **Sunday detected:** Looking ahead to next week.")
+                st.write("📅 **Sunday detected:** Scanning NEXT week.")
             else:
                 s_week = today - timedelta(days=today.weekday())
             e_week = s_week + timedelta(days=6)
@@ -271,7 +255,7 @@ if uploaded_file is not None:
             else:
                 st.info("No birthdays found for this week among active players.")
 
-    # --- SORT & POOLS ---
+    # --- DRAFT LOGIC ---
     available = available.sample(frac=1).reset_index(drop=True)
     available['Status_Rank'] = available['Reg/Spare'].apply(lambda x: 0 if str(x).strip().upper() == 'R' else 1)
     available = available.sort_values(by=['Status_Rank', 'Score'], ascending=[True, False])
@@ -279,14 +263,12 @@ if uploaded_file is not None:
     pool_d = available[available['1st Choice'] == 'D'].copy()
     pool_f = available[available['1st Choice'] == 'F'].copy()
 
-    # --- FILL GAPS ---
     if len(pool_d) < MIN_D_CRITICAL:
         needed = MIN_D_CRITICAL - len(pool_d)
         candidates = pool_f[pool_f['2nd Choice'] == 'D']
         if not candidates.empty:
             converts = candidates.head(needed)
-            pool_d = pd.concat([pool_d, converts])
-            pool_f = pool_f.drop(converts.index)
+            pool_d = pd.concat([pool_d, converts]); pool_f = pool_f.drop(converts.index)
             st.warning(f"⚠️ Critical D Shortage: Moved {len(converts)} F -> D: {', '.join(converts['Full Name'])}")
     
     if len(pool_f) < target_f:
@@ -297,8 +279,7 @@ if uploaded_file is not None:
             candidates = pool_d[pool_d['2nd Choice'] == 'F']
             if not candidates.empty:
                 converts = candidates.head(can_take)
-                pool_f = pd.concat([pool_f, converts])
-                pool_d = pool_d.drop(converts.index)
+                pool_f = pd.concat([pool_f, converts]); pool_d = pool_d.drop(converts.index)
                 st.info(f"Moved {len(converts)} D -> F: {', '.join(converts['Full Name'])}")
 
     if len(pool_d) < target_d:
@@ -309,23 +290,19 @@ if uploaded_file is not None:
             candidates = pool_f[pool_f['2nd Choice'] == 'D']
             if not candidates.empty:
                 converts = candidates.head(amount_to_move)
-                pool_d = pd.concat([pool_d, converts])
-                pool_f = pool_f.drop(converts.index)
+                pool_d = pd.concat([pool_d, converts]); pool_f = pool_f.drop(converts.index)
                 st.info(f"Moved {len(converts)} F -> D: {', '.join(converts['Full Name'])}")
 
-    # --- RIVALS ---
     pre_team_a, pre_team_b, rivalry_notes = [], [], []
 
     def extract_player(name, pd_pool, pf_pool):
         key = clean_name_key(name)
-        # Check D
         pd_pool['MatchKey'] = pd_pool['Full Name'].apply(clean_name_key)
         matches_d = pd_pool[pd_pool['MatchKey'] == key]
         if not matches_d.empty:
             row = matches_d.iloc[0].copy(); row['Position'] = 'D'
             return row, pd_pool.drop(matches_d.index), pf_pool
         
-        # Check F
         pf_pool['MatchKey'] = pf_pool['Full Name'].apply(clean_name_key)
         matches_f = pf_pool[pf_pool['MatchKey'] == key]
         if not matches_f.empty:
@@ -356,7 +333,7 @@ if uploaded_file is not None:
                 if obj2['Position'] == 'D': pool_d = pd.concat([pool_d, obj2.to_frame().T])
                 else: pool_f = pd.concat([pool_f, obj2.to_frame().T])
 
-    # --- DRAFT ---
+    # DRAFT
     if 'MatchKey' in pool_d.columns: del pool_d['MatchKey']
     if 'MatchKey' in pool_f.columns: del pool_f['MatchKey']
     
@@ -371,13 +348,10 @@ if uploaded_file is not None:
     cuts_d = pool_d.iloc[len(sel_d):].copy()
     cuts_f = pool_f.iloc[len(sel_f):].copy()
 
-    sel_d['Position'] = 'D'
-    sel_f['Position'] = 'F'
-
+    sel_d['Position'] = 'D'; sel_f['Position'] = 'F'
     da, db = snake_draft(sel_d)
     fa, fb = snake_draft(sel_f)
 
-    # --- COMBINE ---
     final_cols = list(df.columns)
     if 'Position' not in final_cols: final_cols.append('Position')
     if bday_col_name not in final_cols: final_cols.append(bday_col_name)
@@ -390,7 +364,6 @@ if uploaded_file is not None:
     ta = ta.sort_values(by=['Position', 'Full Name']).reset_index(drop=True)
     tb = tb.sort_values(by=['Position', 'Full Name']).reset_index(drop=True)
 
-    # --- DISPLAY ---
     if st.button("Shuffle Teams Again"): st.rerun()
     if rivalry_notes: 
         st.divider()
@@ -417,13 +390,11 @@ if uploaded_file is not None:
         if not cuts_d.empty: st.write(f"D Cuts: {', '.join(cuts_d['Full Name'])}")
         if not cuts_f.empty: st.write(f"F Cuts: {', '.join(cuts_f['Full Name'])}")
 
-    # --- EMAIL ---
     st.divider()
     all_p = pd.concat([ta, tb])
     if not all_p.empty:
         recipients = [e for e in all_p['Email'].unique() if e and str(e).strip()]
         bcc = ",".join(recipients)
-        
         bday_msg, _ = get_birthday_message(all_p, bday_col_name)
         
         body = f"""{bday_msg}Hello everyone,\n\nHere are the rosters for the upcoming game:\n\n{format_team_list(ta, "RED TEAM")}\n{format_team_list(tb, "WHITE TEAM")}\nKeep your sticks on the ice!"""
